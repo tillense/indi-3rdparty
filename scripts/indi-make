@@ -1,0 +1,435 @@
+#!/bin/bash
+
+# Copyright (C) 2021 Pawel Soja <kernel32.pl@gmail.com>
+
+# This file is free software; as a special exception the author gives
+# unlimited permission to copy and/or distribute it, with or without
+# modifications, as long as this notice is preserved.
+
+# TODO List:
+# - unit tests
+# - packages for other distros
+# - build via docker
+# - safe run script path
+# - run script via wget/curl
+
+set -e
+
+command -v realpath >/dev/null 2>&1 || realpath() {
+    [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
+}
+
+command -v nproc >/dev/null 2>&1 || function nproc {
+    command -v sysctl >/dev/null 2>&1 && sysctl -n hw.logicalcpu || echo "2"
+}
+
+imake_pushd() {
+    [[ $CLEAN == "YES" ]] && rm -rf $1 || true
+    mkdir -p $1 1>&2
+    pushd $1 > /dev/null
+    pushd . > /dev/null
+}
+
+imake_popd() {
+    popd > /dev/null
+    popd > /dev/null
+}
+
+imake_popd_and_remove() {
+    popd > /dev/null
+    rm -rf $(dirs +0) > /dev/null
+    popd > /dev/null
+}
+
+# Default
+PREFIX=/usr/local
+JOBS=$(($(nproc)+1))
+SRCS=$(dirname $(realpath $0))/..
+FIX_WARNINGS=ON
+BUILD_UNITTESTS=ON
+ROOT=$PWD
+OS=$(uname -s)
+
+# Help message
+help () {
+    echo "Usage: $0 OPTION ... MODULE ..."
+    echo
+    echo "Options:"
+    echo "  -c, --clean                 Remove output directory before build."
+    echo "  -b, --build                 Build."
+    echo "      --packages              Build packages."
+    echo "  -j N, --jobs N              Allow N jobs at once. Default: ${JOBS} for your system."
+    echo "  -p PREFIX, --prefix PREFIX  Install directory used by install."
+    echo "  -i, --install               Install build or packages."
+    echo "      --type TYPE             Build type."
+    echo "  -r, --requisites            Install all needed requisites."
+    echo "  -l, --list                  List available modules."
+    echo "      --all                   Select all modules."
+    echo "      --all-libs              Select all libs."
+    echo "      --all-drivers           Select all drivers."
+    echo "  -h, --help                  Prints this message."
+    echo
+    echo "Examples:"
+    echo "  Install all requisites:"
+    echo "  $0 --requisites"
+    echo
+    echo "  List availiable modules:"
+    echo "  $0 --list"
+    echo
+    echo "  Build selected packages (Debian/Ubuntu):"
+    echo "  $0 --packages libasi indi-asi"
+    echo
+    echo "  Build all debian packages (Debian/Ubuntu):"
+    echo "  $0 --packages --all"
+    echo
+    echo "  Build selected sources and install:"
+    echo "  $0 --build --install libasi indi-asi"
+    echo
+    echo "  Build all and install:"
+    echo "  $0 --build --install --all"
+    echo
+    echo "Warning!"
+    echo "  Make sure you have INDI Core Library installed."
+    echo
+    exit 1
+}
+
+[[ $# -eq 0 ]] && help
+
+install_googletest () {
+    echo "Installing googletest..."
+    test -d googletest-src || git clone https://github.com/google/googletest.git $ROOT/googletest-src
+    imake_pushd $ROOT/build/googletest
+    cmake \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON \
+        . $ROOT/googletest-src
+    make -j$JOBS
+    $(command -v sudo) make install
+    imake_popd
+}
+
+install_requisites () {
+    echo "Installing requisites..."
+    # TODO
+    # libtiff-devel ?
+
+    OS=$(uname -s)
+
+    case "$OS" in
+        Darwin)
+            brew install \
+                git \
+                cfitsio libnova libusb curl \
+                gsl jpeg fftw \
+                ffmpeg libftdi libraw libdc1394 libgphoto2 librtlsdr
+            ;;
+        Linux)
+            . /etc/os-release
+            case $ID in
+                debian|ubuntu|raspbian)
+                    export DEBIAN_FRONTEND=noninteractive
+                    $(command -v sudo) apt-get update
+                    $(command -v sudo) apt-get upgrade -y
+                    $(command -v sudo) apt-get install -y \
+                        cdbs dh-make \
+                        \
+                        git \
+                        cmake build-essential zlib1g-dev \
+                        libcfitsio-dev libnova-dev libusb-1.0-0-dev libcurl4-gnutls-dev \
+                        libgsl-dev libjpeg-dev libfftw3-dev \
+                        \
+                        libftdi1-dev libavcodec-dev libavdevice-dev libavformat-dev libswscale-dev \
+                        libgps-dev libraw-dev libdc1394-22-dev libgphoto2-dev \
+                        libboost-dev libboost-regex-dev librtlsdr-dev liblimesuite-dev \
+                        \
+                        fxload \
+                        lsb_release libftdi1 libusb-0.1-4 rtklib
+                    ;;
+                fedora)
+                    $(command -v sudo) dnf upgrade -y
+                    $(command -v sudo) dnf install -y \
+                        fedora-packager fedora-review \
+                        \
+                        git \
+                        cmake gcc-c++ zlib-devel \
+                        cfitsio-devel libnova-devel libusb-devel libcurl-devel \
+                        gsl-devel libjpeg-devel fftw-devel \
+                        \
+                        https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \
+                        https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+
+                    $(command -v sudo) dnf install -y \
+                        ffmpeg-devel \
+                        libftdi-devel \
+                        gpsd-devel LibRaw-devel libdc1394-devel libgphoto2-devel \
+                        boost-devel rtl-sdr-devel
+
+                    ;;
+                centos)
+                    # CentOS 8 dont have libnova-devel package
+                    $(command -v sudo) yum install -y epel-release
+                    $(command -v sudo) yum upgrade -y
+                    $(command -v sudo) yum install -y \
+                        git \
+                        cmake gcc-c++ zlib-devel \
+                        cfitsio-devel libnova-devel libusb-devel libcurl-devel \
+                        gsl-devel libjpeg-devel fftw-devel
+                    ;;
+                opensuse-tumbleweed)
+                    # broken git/openssh package
+                    $(command -v sudo) zypper refresh
+                    $(command -v sudo) zypper --non-interactive update
+                    $(command -v sudo) zypper --non-interactive install -y \
+                        openssh git \
+                        cmake gcc-c++ zlib-devel \
+                        cfitsio-devel libnova-devel libusb-devel libcurl-devel \
+                        gsl-devel libjpeg-devel fftw-devel libtheora-devel
+                    ;;
+                *)
+                    echo "System is not supported: $ID"
+                    cat /etc/os-release
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            echo "System is not supported: $OS"
+            exit 1
+    esac
+}
+
+imake_list_libs () {
+    imake_pushd $ROOT/build/indi-3rdparty-check-libs 1>&2
+    cmake -DBUILD_LIBS=1 . $SRCS 1>&2
+    echo "$(\ls -d */ | sed 's#/##' | grep -v CMakeFiles | sort)"
+    imake_popd_and_remove 1>&2
+}
+
+imake_list_drivers () {
+    imake_pushd $ROOT/build/indi-3rdparty-check-drivers 1>&2
+    cmake -DBUILD_LIBS=0 . $SRCS 1>&2
+    echo "$(join -v 1 <(\ls -d */ | sed 's#/##' | grep -v CMakeFiles | sort) <(imake_list_libs))"
+    imake_popd_and_remove 1>&2
+}
+
+imake_all () {
+    # Configure
+    imake_pushd $ROOT/build/indi-3rdparty
+    cmake \
+        -DCMAKE_INSTALL_PREFIX=$PREFIX \
+        -DFIX_WARNINGS=$FIX_WARNINGS \
+        -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+        -DINDI_BUILD_UNITTESTS=$BUILD_UNITTESTS \
+        -DBUILD_LIBS=$1 \
+        . $SRCS
+
+    # Build
+    if [[ $BUILD == "YES" ]]; then
+        echo "Building libs..."
+        make -j$JOBS
+    fi
+
+    # Install
+    if [[ $INSTALL == "YES" ]]; then
+        echo "Installing libs..."
+        $(command -v sudo) make install
+    fi
+    imake_popd
+}
+
+imake_packages () {
+    MODULE=$1
+
+    imake_pushd $ROOT/build/indi-3rdparty-packages/$MODULE
+    case "$OS" in
+        Linux)
+            . /etc/os-release
+            case $ID in
+                debian|ubuntu|raspbian)
+                    cp -a $SRCS/$MODULE/ .
+                    cp -a $SRCS/debian/$MODULE/ ./debian/
+                    cp -a $SRCS/cmake_modules ./
+                    fakeroot debian/rules -j$JOBS binary
+                    ;;
+                *)
+                    echo "System is not supported: $ID"
+                    cat /etc/os-release
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            echo "System is not supported: $OS"
+            exit 1
+    esac
+    imake_popd
+}
+
+imake_module () {
+    MODULE=$1
+
+    if [[ $BUILD == "YES" ]] || ( [[ $INSTALL == "YES" ]] && [[ $PACKAGES != "YES" ]] ); then
+        imake_pushd $ROOT/build/indi-3rdparty/$MODULE
+        # Configure
+        cmake \
+            -DCMAKE_INSTALL_PREFIX=$PREFIX \
+            -DFIX_WARNINGS=$FIX_WARNINGS \
+            -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+            -DINDI_BUILD_UNITTESTS=$BUILD_UNITTESTS \
+            . $SRCS/$MODULE
+
+        # Build
+        if [[ $BUILD == "YES" ]]; then
+            echo "Building ${MODULE}..."
+            make -j$JOBS
+        fi
+
+        # Install
+        if [[ $INSTALL == "YES" ]] && [[ $PACKAGES != "YES" ]]; then
+            echo "Installing ${MODULE}..."
+            $(command -v sudo) make install
+        fi
+        imake_popd
+    fi
+
+    # Build packages
+    if [[ $PACKAGES == "YES" ]]; then
+        echo "Building ${MODULE} packages..."
+        imake_packages $MODULE
+    fi
+
+}
+
+imake_from_list () {
+    # Build, build package, install
+    PIDS=
+    for MODULE in $@
+    do
+        imake_module $MODULE &
+        PIDS+=("$!")
+    done
+
+    for PID in ${PIDS[*]}
+    do
+        wait $PID
+    done
+
+    # Install/move packages
+    pushd $ROOT/build/indi-3rdparty-packages
+    case "$OS" in
+        Linux)
+            . /etc/os-release
+            case $ID in
+                debian|ubuntu|raspbian)
+                if [[ $INSTALL == "YES" ]]; then
+                    echo "Installing from packages..."
+                    dpkg -i $(ls ./*.deb | grep -v dbg) || true
+                    #PKG_DBG=$(ls ../*.deb | grep  dbg)
+                    # [[ -n $PKG_DBG ]] && dpkg -i $PKG_DBG || true
+                fi
+                mkdir -p $ROOT/packages/
+                mv *.deb $ROOT/packages/
+                ;;
+            esac
+            ;;
+        *)
+    esac
+    popd
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]
+do
+  case "$1" in
+    -c|--clean)
+        CLEAN=YES
+        ;;
+    -b|--build)
+        BUILD=YES
+        ;;
+    --packages)
+        PACKAGES=YES
+        ;;
+    -i|--install)
+        INSTALL=YES
+        ;;
+    -j|--jobs)
+        shift
+        JOBS="$1"
+        ;;
+    -p|--prefix)
+        shift
+        PREFIX="$1"
+        ;;
+    --type)
+        shift
+        BUILD_TYPE="$1"
+        ;;
+    --all)
+        BUILD_ALL_LIBS=YES
+        BUILD_ALL_DRVS=YES
+        ;;
+    --all-libs)
+        BUILD_ALL_LIBS=YES
+        ;;
+    --all-drivers)
+        BUILD_ALL_DRVS=YES
+        ;;
+    -l|--list)
+        LIBS="$(imake_list_libs)"
+        DRVS="$(imake_list_drivers)"
+        echo
+        echo "Available libraries:"
+        echo $LIBS
+        echo
+        echo "Available drivers:"
+        echo $DRVS
+        echo
+        echo "If the driver is missing, install the necessary libraries."
+        echo
+        exit 1
+        ;;
+    -r|--requisites)
+        REQUISITES=YES
+        ;;
+    -h|--help)
+        help
+        ;;
+    *)
+        POSITIONAL+=("$1")
+        ;;
+  esac
+  shift
+done
+
+set -- "${POSITIONAL[@]}"
+
+# Requisites
+if [[ $REQUISITES == "YES" ]]; then
+    install_requisites
+    install_googletest
+fi
+
+# Build all
+if ( [[ $BUILD_ALL_LIBS == "YES" ]] || [[ $BUILD_ALL_DRVS == "YES" ]] ) && [[ $PACKAGES != "YES" ]]; then
+    [[ $BUILD_ALL_LIBS == "YES" ]] && imake_all 1
+    [[ $BUILD_ALL_DRVS == "YES" ]] && imake_all 0
+    exit 0
+fi
+
+# Build module by module
+if [[ $BUILD_ALL_LIBS == "YES" ]]; then
+    echo "Build all libs."
+    imake_from_list $(imake_list_libs)
+fi
+
+if [[ $BUILD_ALL_DRVS == "YES" ]]; then
+    echo "Build all drivers."
+    imake_from_list $(imake_list_drivers)
+fi
+
+# Build others
+if [[ $# -gt 0 ]]; then
+    imake_from_list $@
+fi

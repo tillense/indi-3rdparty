@@ -36,7 +36,7 @@ bool AZGTIBase::initProperties()
     tcpConnection->setDefaultHost("192.168.4.1");
     tcpConnection->setDefaultPort(11880);
     tcpConnection->setConnectionType(Connection::TCP::TYPE_UDP);
-
+#ifndef INDI_BASEDEVICE_VERSION
     for (auto oneProperty : *getProperties())
     {
         switch(oneProperty->getType())
@@ -64,6 +64,11 @@ bool AZGTIBase::initProperties()
                 break;
         }
     }
-
+#else
+    for (auto &oneProperty : getProperties())
+    {
+        oneProperty.setDeviceName(getDeviceName());
+    }
+#endif
     return true;
 }

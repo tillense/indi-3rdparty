@@ -93,14 +93,19 @@ void indiduino::TimerHit()
         return;
 
     sf->OnIdle();
-
+#ifndef INDI_BASEDEVICE_VERSION
     std::vector<INDI::Property *> *pAll = getProperties();
 
     for (unsigned int i = 0; i < pAll->size(); i++)
     {
         const char *name = pAll->at(i)->getName();
         INDI_PROPERTY_TYPE type = pAll->at(i)->getType();
-
+#else
+    for (auto &prop : getProperties())
+    {
+        const char *name = prop.getName();
+        INDI_PROPERTY_TYPE type = prop.getType();
+#endif
         //DIGITAL INPUT
         if (type == INDI_LIGHT)
         {
@@ -744,13 +749,20 @@ bool indiduino::setPinModesFromSKEL()
     }
 
     LOG_INFO("Setting pins behaviour from <indiduino> tags");
+
+#ifndef INDI_BASEDEVICE_VERSION
     std::vector<INDI::Property *> *pAll = getProperties();
 
     for (unsigned int i = 0; i < pAll->size(); i++)
     {
         const char *name = pAll->at(i)->getName();
         INDI_PROPERTY_TYPE type = pAll->at(i)->getType();
-
+#else
+    for (auto &prop : getProperties())
+    {
+        const char *name = prop.getName();
+        INDI_PROPERTY_TYPE type = prop.getType();
+#endif
         if (ep == nullptr)
         {
             ep = nextXMLEle(fproot, 1);
